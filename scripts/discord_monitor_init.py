@@ -4,7 +4,7 @@ import requests
 import traceback
 from datetime import datetime
 
-CREDENTIALS_FILE = "/home/hvacuser/projects/hvac_workspace/hvac_automation/credentials.txt"
+CREDENTIALS_FILE = "/home/hvacuser/projects/hvac_workspace/automation/hvac/credentials.txt"
 DISCORD_WEBHOOK = ""
 
 def load_webhook_url():

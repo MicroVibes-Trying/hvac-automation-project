@@ -50,9 +50,16 @@ class Config:
     GOOGLE_PLACES_API_KEY = get_credential('GOOGLE_PLACES_API_KEY', '')
     HUNTER_API_KEY = get_credential('HUNTER_API_KEY', '')
     
-    # Gmail Configuration - Loaded from credentials.txt file
+    # Email Configuration - Loaded from credentials.txt file
+    # Gmail (Legacy - for fallback)
     GMAIL_USER = get_credential('GMAIL_USER', '')
     GMAIL_APP_PASSWORD = get_credential('GMAIL_APP_PASSWORD', '')
+    
+    # Mailgun (Primary email service)
+    MAILGUN_API_KEY = get_credential('MAILGUN_API_KEY', '')
+    MAILGUN_DOMAIN = get_credential('MAILGUN_DOMAIN', 'mg.stxautomate.com')
+    MAILGUN_REGION = get_credential('MAILGUN_REGION', 'US')  # US or EU
+    MAILGUN_FROM_EMAIL = f"noreply@{get_credential('MAILGUN_DOMAIN', 'mg.stxautomate.com')}"
     
     # Search Configuration - Handle potential None values
     CITIES = [city.strip() for city in get_credential('CITIES', 'Houston,Dallas,Austin,San Antonio,Fort Worth').split(',')]
@@ -61,16 +68,22 @@ class Config:
     # Affiliate Configuration - Loaded from credentials.txt file
     FIVERR_AFFILIATE_LINK = get_credential('FIVERR_AFFILIATE_LINK', '')
     
-    # Rate Limiting (Anti-Spam Measures) - Load from credentials.txt with defaults
-    MAX_EMAILS_PER_DAY = int(get_credential('MAX_EMAILS_PER_DAY', '50'))
-    MAX_EMAILS_PER_RUN = int(get_credential('MAX_EMAILS_PER_RUN', '25'))
-    EMAIL_DELAY_SECONDS = int(get_credential('EMAIL_DELAY_SECONDS', '30'))
-    EMAIL_DELAY_MIN = int(get_credential('EMAIL_DELAY_MIN', '120'))  # 2 minutes
-    EMAIL_DELAY_MAX = int(get_credential('EMAIL_DELAY_MAX', '300'))  # 5 minutes  
+    # Rate Limiting - Optimized for Mailgun API
+    MAX_EMAILS_PER_DAY = int(get_credential('MAX_EMAILS_PER_DAY', '1000'))  # Increased from 50
+    MAX_EMAILS_PER_RUN = int(get_credential('MAX_EMAILS_PER_RUN', '100'))   # Increased from 25
+    EMAIL_DELAY_SECONDS = int(get_credential('EMAIL_DELAY_SECONDS', '10'))  # Reduced from 30
+    EMAIL_DELAY_MIN = int(get_credential('EMAIL_DELAY_MIN', '5'))           # Reduced from 120
+    EMAIL_DELAY_MAX = int(get_credential('EMAIL_DELAY_MAX', '15'))          # Reduced from 300
     MAX_HUNTER_REQUESTS_PER_DAY = int(get_credential('MAX_HUNTER_REQUESTS_PER_DAY', '100'))
-    EMAIL_COOLDOWN_HOURS = int(get_credential('EMAIL_COOLDOWN_HOURS', '72'))
-    COOLDOWN_DAYS = int(get_credential('COOLDOWN_DAYS', '7'))  # 7 days default
-    THROTTLE_DELAY = int(get_credential('THROTTLE_DELAY', '2'))
+    EMAIL_COOLDOWN_HOURS = int(get_credential('EMAIL_COOLDOWN_HOURS', '24'))  # Reduced from 72
+    COOLDOWN_DAYS = int(get_credential('COOLDOWN_DAYS', '1'))               # Reduced from 7
+    THROTTLE_DELAY = int(get_credential('THROTTLE_DELAY', '1'))             # Reduced from 2
+    
+    # Mailgun API Configuration
+    MAILGUN_API_TIMEOUT = int(get_credential('MAILGUN_API_TIMEOUT', '30'))
+    MAILGUN_ENABLE_TRACKING = get_credential('MAILGUN_ENABLE_TRACKING', 'true').lower() == 'true'
+    MAILGUN_TRACK_CLICKS = get_credential('MAILGUN_TRACK_CLICKS', 'true').lower() == 'true'
+    MAILGUN_TRACK_OPENS = get_credential('MAILGUN_TRACK_OPENS', 'true').lower() == 'true'
     
     # Database
     DATABASE_PATH = get_credential('DATABASE_PATH', 'hvac_automation.db')

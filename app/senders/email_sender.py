@@ -1,17 +1,14 @@
 """
-Enhanced Email Sender v3
-Anti-spam email delivery system with 7-day cooldown and intelligent throttling
+Enhanced Email Sender v4 - Mailgun API Integration
+High-performance email delivery system with Mailgun REST API
 """
-import smtplib
+import requests
 import time
 import random
 import logging
+import json
 from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional
-from email.mime.text import MIMEText as MimeText
-from email.mime.multipart import MIMEMultipart as MimeMultipart
-from email.mime.base import MIMEBase as MimeBase
-from email import encoders
 import uuid
 
 from ..core.config import config
@@ -22,26 +19,37 @@ logging.basicConfig(level=getattr(logging, config.LOG_LEVEL))
 logger = logging.getLogger(__name__)
 
 class EmailSender:
-    """Enhanced email sender with anti-spam measures and cooldown tracking"""
+    """Enhanced email sender using Mailgun REST API"""
     
     def __init__(self):
-        self.smtp_server = "smtp.gmail.com"
-        self.smtp_port = 587
-        self.username = config.GMAIL_USER
-        self.password = config.GMAIL_APP_PASSWORD
+        # Mailgun Configuration
+        self.api_key = config.MAILGUN_API_KEY
+        self.domain = config.MAILGUN_DOMAIN
+        self.from_email = config.MAILGUN_FROM_EMAIL
+        
+        # Determine API base URL based on region
+        if config.MAILGUN_REGION.upper() == 'EU':
+            self.base_url = f"https://api.eu.mailgun.net/v3/{self.domain}"
+        else:
+            self.base_url = f"https://api.mailgun.net/v3/{self.domain}"
         
         # Email templates
         self.default_template = self.get_default_template()
         
-        # Anti-spam settings
-        self.min_delay = config.EMAIL_DELAY_MIN  # 2 minutes
-        self.max_delay = config.EMAIL_DELAY_MAX  # 5 minutes
-        self.cooldown_days = config.COOLDOWN_DAYS  # 7 days
+        # Optimized settings for Mailgun
+        self.min_delay = config.EMAIL_DELAY_MIN  # 5 seconds
+        self.max_delay = config.EMAIL_DELAY_MAX  # 15 seconds
+        self.cooldown_days = config.COOLDOWN_DAYS  # 1 day
         
-        # Session management
-        self.smtp_connection = None
-        self.emails_sent_in_session = 0
-        self.max_emails_per_session = 10  # Reconnect after 10 emails
+        # API timeout and retry settings
+        self.api_timeout = config.MAILGUN_API_TIMEOUT
+        self.max_retries = 3
+        
+        # Session for connection pooling
+        self.session = requests.Session()
+        self.session.auth = ("api", self.api_key)
+        
+        logger.info(f"📧 Mailgun Email Sender initialized - Domain: {self.domain}")
     
     def get_default_template(self) -> Dict[str, str]:
         """Get default email template"""
@@ -83,62 +91,9 @@ P.S. This special pricing is only available for a limited time, so I'd recommend
 This message was sent to help grow your business. If you'd prefer not to receive similar opportunities, simply reply with "REMOVE" and I'll respect your preference immediately.'''
         }
     
-    def create_smtp_connection(self) -> bool:
-        """Create and authenticate SMTP connection"""
-        try:
-            if self.smtp_connection:
-                try:
-                    # Test existing connection
-                    self.smtp_connection.noop()
-                    return True
-                except Exception:
-                    # Connection is dead, create new one
-                    self.smtp_connection = None
-            
-            if not self.username or not self.password:
-                logger.error("Gmail credentials not configured")
-                return False
-            
-            logger.debug("Creating new SMTP connection...")
-            self.smtp_connection = smtplib.SMTP(self.smtp_server, self.smtp_port)
-            self.smtp_connection.starttls()
-            self.smtp_connection.login(self.username, self.password)
-            
-            self.emails_sent_in_session = 0
-            logger.debug("SMTP connection established successfully")
-            return True
-            
-        except Exception as e:
-            logger.error(f"Failed to create SMTP connection: {e}")
-            self.smtp_connection = None
-            return False
-    
-    def close_smtp_connection(self):
-        """Close SMTP connection"""
-        if self.smtp_connection:
-            try:
-                self.smtp_connection.quit()
-                logger.debug("SMTP connection closed")
-            except Exception as e:
-                logger.warning(f"Error closing SMTP connection: {e}")
-            finally:
-                self.smtp_connection = None
-                self.emails_sent_in_session = 0
-    
-    def create_email_message(self, lead: Dict[str, Any], template: Optional[Dict[str, str]] = None) -> MimeMultipart:
-        """Create email message from template"""
+    def create_email_data(self, lead: Dict[str, Any], template: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+        """Create email data for Mailgun API"""
         template = template or self.default_template
-        
-        # Create message
-        msg = MimeMultipart()
-        msg['From'] = self.username
-        msg['To'] = lead['email_address']
-        msg['Subject'] = template['subject']
-        
-        # Add custom headers for better deliverability
-        msg['Reply-To'] = self.username
-        msg['X-Mailer'] = 'HVAC-Automation/3.0'
-        msg['Message-ID'] = f"<{uuid.uuid4()}@hvac-automation.local>"
         
         # Personalize email body
         body = template['body'].format(
@@ -149,13 +104,89 @@ This message was sent to help grow your business. If you'd prefer not to receive
             affiliate_link=config.FIVERR_AFFILIATE_LINK
         )
         
-        # Attach body
-        msg.attach(MimeText(body, 'plain'))
+        # Create email data for Mailgun API
+        email_data = {
+            'from': self.from_email,
+            'to': lead['email_address'],
+            'subject': template['subject'],
+            'html': body.replace('\n', '<br>\n'),  # Convert to HTML
+            'text': body  # Plain text version
+        }
         
-        return msg
+        # Add tracking if enabled
+        if config.MAILGUN_ENABLE_TRACKING:
+            email_data['o:tracking'] = 'yes'
+        
+        if config.MAILGUN_TRACK_CLICKS:
+            email_data['o:tracking-clicks'] = 'yes'
+            
+        if config.MAILGUN_TRACK_OPENS:
+            email_data['o:tracking-opens'] = 'yes'
+        
+        # Add custom variables for tracking
+        email_data['v:lead_id'] = str(lead['id'])
+        email_data['v:business_name'] = lead.get('business_name', '')
+        
+        return email_data
+    
+    def send_via_mailgun_api(self, email_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Send email via Mailgun REST API with retry logic"""
+        url = f"{self.base_url}/messages"
+        
+        for attempt in range(self.max_retries):
+            try:
+                response = self.session.post(
+                    url,
+                    data=email_data,
+                    timeout=self.api_timeout
+                )
+                
+                # Parse response
+                response_data = response.json() if response.content else {}
+                
+                if response.status_code == 200:
+                    logger.debug(f"✅ Mailgun API success: {response_data}")
+                    return {
+                        'success': True,
+                        'message_id': response_data.get('id', ''),
+                        'message': response_data.get('message', 'Queued'),
+                        'status_code': response.status_code
+                    }
+                else:
+                    logger.warning(f"⚠️ Mailgun API error {response.status_code}: {response_data}")
+                    return {
+                        'success': False,
+                        'error': response_data.get('message', f'HTTP {response.status_code}'),
+                        'status_code': response.status_code
+                    }
+                    
+            except requests.exceptions.Timeout:
+                logger.warning(f"⏱️ Mailgun API timeout (attempt {attempt + 1}/{self.max_retries})")
+                if attempt < self.max_retries - 1:
+                    time.sleep(2 ** attempt)  # Exponential backoff
+                    continue
+                return {
+                    'success': False,
+                    'error': f'API timeout after {self.max_retries} attempts',
+                    'status_code': 0
+                }
+                
+            except requests.exceptions.RequestException as e:
+                logger.error(f"❌ Mailgun API request error: {e}")
+                return {
+                    'success': False,
+                    'error': f'Request error: {str(e)}',
+                    'status_code': 0
+                }
+        
+        return {
+            'success': False,
+            'error': f'Failed after {self.max_retries} attempts',
+            'status_code': 0
+        }
     
     def send_single_email(self, lead: Dict[str, Any], template: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
-        """Send email to a single lead"""
+        """Send email to a single lead via Mailgun API"""
         campaign_id = str(uuid.uuid4())[:8]
         
         try:
@@ -169,98 +200,62 @@ This message was sent to help grow your business. If you'd prefer not to receive
                     'campaign_id': campaign_id
                 }
             
-            # Create SMTP connection if needed
-            if not self.create_smtp_connection():
+            # Create email data
+            email_data = self.create_email_data(lead, template)
+            
+            # Send via Mailgun API
+            api_result = self.send_via_mailgun_api(email_data)
+            
+            if api_result['success']:
+                # Log successful send
+                send_data = {
+                    'lead_id': lead['id'],
+                    'email_address': lead['email_address'],
+                    'subject': email_data['subject'],
+                    'sent_date': datetime.now(),
+                    'status': 'sent',
+                    'response_code': str(api_result['status_code']),
+                    'campaign_id': campaign_id,
+                    'message_id': api_result.get('message_id', '')
+                }
+                
+                db.insert_email_send(send_data)
+                
+                logger.info(f"✅ Email sent to {lead['business_name']} ({lead['email_address']}) - ID: {api_result.get('message_id', 'N/A')}")
+                
+                return {
+                    'status': 'sent',
+                    'lead_id': lead['id'],
+                    'campaign_id': campaign_id,
+                    'email_address': lead['email_address'],
+                    'message_id': api_result.get('message_id', '')
+                }
+            else:
+                # Log failed send
+                error_msg = api_result.get('error', 'Unknown API error')
+                
+                send_data = {
+                    'lead_id': lead['id'],
+                    'email_address': lead['email_address'],
+                    'subject': email_data['subject'],
+                    'sent_date': datetime.now(),
+                    'status': 'failed',
+                    'error_message': error_msg,
+                    'response_code': str(api_result.get('status_code', 0)),
+                    'campaign_id': campaign_id
+                }
+                
+                db.insert_email_send(send_data)
+                
+                logger.error(f"❌ Failed to send to {lead['business_name']}: {error_msg}")
+                
                 return {
                     'status': 'failed',
-                    'error': 'Failed to create SMTP connection',
+                    'error': error_msg,
                     'lead_id': lead['id'],
                     'campaign_id': campaign_id
                 }
-            
-            # Create email message
-            msg = self.create_email_message(lead, template)
-            
-            # Send email
-            if self.smtp_connection:
-                self.smtp_connection.send_message(msg)
-            self.emails_sent_in_session += 1
-            
-            # Log successful send
-            send_data = {
-                'lead_id': lead['id'],
-                'email_address': lead['email_address'],
-                'subject': msg['Subject'],
-                'sent_date': datetime.now(),
-                'status': 'sent',
-                'response_code': '250',
-                'campaign_id': campaign_id
-            }
-            
-            db.insert_email_send(send_data)
-            
-            logger.info(f"✅ Email sent to {lead['business_name']} ({lead['email_address']})")
-            
-            # Close connection if we've sent too many emails
-            if self.emails_sent_in_session >= self.max_emails_per_session:
-                self.close_smtp_connection()
-            
-            return {
-                'status': 'sent',
-                'lead_id': lead['id'],
-                'campaign_id': campaign_id,
-                'email_address': lead['email_address']
-            }
-            
-        except smtplib.SMTPRecipientsRefused as e:
-            error_msg = f"Recipient refused: {str(e)}"
-            logger.warning(f"❌ {lead['business_name']}: {error_msg}")
-            
-            send_data = {
-                'lead_id': lead['id'],
-                'email_address': lead['email_address'],
-                'subject': template['subject'] if template else self.default_template['subject'],
-                'sent_date': datetime.now(),
-                'status': 'failed',
-                'error_message': error_msg,
-                'campaign_id': campaign_id
-            }
-            
-            db.insert_email_send(send_data)
-            
-            return {
-                'status': 'failed',
-                'error': error_msg,
-                'lead_id': lead['id'],
-                'campaign_id': campaign_id
-            }
-            
-        except smtplib.SMTPException as e:
-            error_msg = f"SMTP error: {str(e)}"
-            logger.error(f"❌ {lead['business_name']}: {error_msg}")
-            
-            # Close connection on SMTP errors
-            self.close_smtp_connection()
-            
-            send_data = {
-                'lead_id': lead['id'],
-                'email_address': lead['email_address'],
-                'subject': template['subject'] if template else self.default_template['subject'],
-                'sent_date': datetime.now(),
-                'status': 'failed',
-                'error_message': error_msg,
-                'campaign_id': campaign_id
-            }
-            
-            db.insert_email_send(send_data)
-            
-            return {
-                'status': 'failed',
-                'error': error_msg,
-                'lead_id': lead['id'],
-                'campaign_id': campaign_id
-            }
-            
+                
         except Exception as e:
             error_msg = f"Unexpected error: {str(e)}"
             logger.error(f"❌ {lead['business_name']}: {error_msg}")
@@ -285,28 +280,26 @@ This message was sent to help grow your business. If you'd prefer not to receive
             }
     
     def intelligent_delay(self, email_count: int):
-        """Apply intelligent delay between emails"""
+        """Apply intelligent delay between emails (much shorter for Mailgun)"""
         base_delay = random.uniform(self.min_delay, self.max_delay)
         
-        # Increase delay as we send more emails
-        if email_count > 10:
+        # Slight increase for higher volumes (less aggressive than Gmail)
+        if email_count > 50:
+            base_delay *= 1.2
+        elif email_count > 100:
             base_delay *= 1.5
-        elif email_count > 20:
-            base_delay *= 2.0
-        elif email_count > 30:
-            base_delay *= 2.5
         
-        # Add random variation (±20%)
-        variation = base_delay * 0.2
+        # Add random variation (±10%)
+        variation = base_delay * 0.1
         delay = base_delay + random.uniform(-variation, variation)
         
         logger.debug(f"Waiting {delay:.1f} seconds before next email...")
         time.sleep(delay)
     
     def send_batch_emails(self, limit: Optional[int] = None, template: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
-        """Send emails to multiple leads with anti-spam measures"""
+        """Send emails to multiple leads with optimized Mailgun performance"""
         limit = limit or config.MAX_EMAILS_PER_RUN
-        logger.info(f"📧 Starting email sending batch (limit: {limit})...")
+        logger.info(f"📧 Starting Mailgun email batch (limit: {limit})...")
         
         start_time = datetime.now()
         total_processed = 0
@@ -360,9 +353,6 @@ This message was sent to help grow your business. If you'd prefer not to receive
                     logger.error(error_msg)
                     errors.append(error_msg)
             
-            # Close any remaining connections
-            self.close_smtp_connection()
-            
             # Calculate duration and success rate
             duration = datetime.now() - start_time
             success_rate = round((total_sent / total_processed * 100) if total_processed > 0 else 0, 1)
@@ -382,22 +372,19 @@ This message was sent to help grow your business. If you'd prefer not to receive
             # Log completion
             db.log_system_event(
                 'INFO',
-                'sender',
-                f'Email sending completed: {total_sent}/{total_processed} emails sent',
+                'mailgun_sender',
+                f'Mailgun email batch completed: {total_sent}/{total_processed} emails sent',
                 f'Sent: {total_sent}, Skipped: {total_skipped}, Failed: {total_failed}, Success rate: {success_rate}%'
             )
             
-            logger.info(f"✅ Email sending complete: {total_sent}/{total_processed} emails sent")
+            logger.info(f"✅ Mailgun batch complete: {total_sent}/{total_processed} emails sent in {duration}")
             return summary
             
         except Exception as e:
-            error_msg = f"Email sending batch failed: {str(e)}"
+            error_msg = f"Mailgun batch sending failed: {str(e)}"
             logger.error(error_msg)
             
-            # Ensure connection is closed
-            self.close_smtp_connection()
-            
-            db.log_system_event('ERROR', 'sender', error_msg, None)
+            db.log_system_event('ERROR', 'mailgun_sender', error_msg, None)
             
             return {
                 'total_processed': total_processed,
@@ -411,45 +398,76 @@ This message was sent to help grow your business. If you'd prefer not to receive
             }
     
     def send_notification_email(self, subject: str, message: str, recipient: Optional[str] = None):
-        """Send notification email to admin"""
+        """Send notification email via Mailgun"""
         recipient = recipient or config.NOTIFICATION_EMAIL
         
         try:
-            if not self.create_smtp_connection() or not self.smtp_connection:
-                logger.error("Failed to send notification: SMTP connection failed")
-                return False
-            
             if not recipient:
                 logger.error("No notification recipient configured")
                 return False
             
-            msg = MimeMultipart()
-            msg['From'] = self.username or ""
-            msg['To'] = recipient
-            msg['Subject'] = f"[HVAC Automation] {subject}"
-            
-            body = f"""HVAC Email Automation System Notification
+            notification_data = {
+                'from': self.from_email,
+                'to': recipient,
+                'subject': f"[HVAC Automation] {subject}",
+                'html': f"""
+                <h2>HVAC Email Automation System Notification</h2>
+                <p>{message}</p>
+                <hr>
+                <p><strong>Timestamp:</strong> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
+                <p><strong>Server:</strong> Production Environment</p>
+                <p><strong>Email Service:</strong> Mailgun API</p>
+                <hr>
+                <p><em>This is an automated notification from your HVAC Email Automation system.</em></p>
+                """,
+                'text': f"""HVAC Email Automation System Notification
 
 {message}
 
 Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 Server: Production Environment
+Email Service: Mailgun API
 
 ---
 This is an automated notification from your HVAC Email Automation system.
 """
+            }
             
-            msg.attach(MimeText(body, 'plain'))
-            self.smtp_connection.send_message(msg)
+            api_result = self.send_via_mailgun_api(notification_data)
             
-            logger.info(f"Notification email sent: {subject}")
-            self.close_smtp_connection()
-            return True
-            
+            if api_result['success']:
+                logger.info(f"📬 Notification sent via Mailgun: {subject}")
+                return True
+            else:
+                logger.error(f"❌ Failed to send notification: {api_result.get('error', 'Unknown error')}")
+                return False
+                
         except Exception as e:
-            logger.error(f"Failed to send notification email: {e}")
-            self.close_smtp_connection()
+            logger.error(f"❌ Notification error: {e}")
             return False
+    
+    def get_email_stats(self) -> Dict[str, Any]:
+        """Get email sending statistics"""
+        try:
+            # This could be extended to query Mailgun's stats API
+            # For now, return basic stats from our database
+            return {
+                'service': 'Mailgun API',
+                'domain': self.domain,
+                'from_email': self.from_email,
+                'daily_limit': config.MAX_EMAILS_PER_DAY,
+                'run_limit': config.MAX_EMAILS_PER_RUN,
+                'cooldown_days': self.cooldown_days,
+                'tracking_enabled': config.MAILGUN_ENABLE_TRACKING
+            }
+        except Exception as e:
+            logger.error(f"Error getting email stats: {e}")
+            return {}
+    
+    def __del__(self):
+        """Cleanup session on destruction"""
+        if hasattr(self, 'session'):
+            self.session.close()
 
 def main():
     """Main function for standalone execution"""
@@ -457,7 +475,7 @@ def main():
         sender = EmailSender()
         results = sender.send_batch_emails()
         
-        print(f"\n📧 Email Sending Results:")
+        print(f"\n📧 Mailgun Email Sending Results:")
         print(f"   Processed: {results['total_processed']} leads")
         print(f"   Sent: {results['total_sent']} emails")
         print(f"   Skipped: {results['total_skipped']} (cooldown)")
